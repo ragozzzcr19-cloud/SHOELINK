@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>SHOELINK - Envío de modelos</title>
+<style>
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#f4f5f7;color:#1b1d22;}
+  header{background:#fff;border-bottom:1px solid #e3e5ea;padding:14px 16px;text-align:center;font-weight:800;letter-spacing:1px;}
+  main{max-width:640px;margin:0 auto;padding:16px;}
+  .card{background:#fff;border:1px solid #e3e5ea;border-radius:12px;padding:14px;margin-bottom:14px;}
+  h2{font-size:1rem;margin:0 0 10px;}
+  label{display:block;font-size:.78rem;color:#5b6070;margin:10px 0 4px;}
+  input,select{width:100%;padding:10px;border:1px solid #cfd3dc;border-radius:8px;font-size:1rem;background:#fff;}
+  .row{display:flex;gap:8px;}
+  .row>*{flex:1;}
+  .btn{display:inline-block;padding:11px 16px;border-radius:10px;border:0;background:#ee7a3c;color:#fff;font-weight:700;font-size:.95rem;cursor:pointer;}
+  .btn.sec{background:#e9ebf0;color:#1b1d22;}
+  .btn.del{background:#fde8e6;color:#b3261e;padding:8px 12px;}
+  .btn:disabled{opacity:.5;}
+  .sizes .srow{display:flex;gap:8px;margin-bottom:6px;align-items:center;}
+  .thumbs{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;}
+  .thumbs img{width:72px;height:72px;object-fit:cover;border-radius:8px;border:1px solid #ddd;}
+  .msg{padding:12px;border-radius:10px;margin-bottom:14px;font-size:.9rem;}
+  .err{background:#fde8e6;color:#8c1d18;}
+  .ok{background:#e4f6ea;color:#14602b;}
+  .hint{font-size:.74rem;color:#7a7f8e;margin-top:4px;}
+</style>
+</head>
+<body>
+<header>SHOELINK</header>
+<main>
+  <div id="status"></div>
+  <div id="formArea" style="display:none;">
+    <div class="card">
+      <h2>Tus datos</h2>
+      <label>Nombre de tu empresa o contacto</label>
+      <input id="supplierName" type="text" maxlength="80" placeholder="Ej. Distribuidora XYZ">
+      <label>Tu WhatsApp (con código de país, solo números)</label>
+      <input id="supplierPhone" type="tel" inputmode="numeric" maxlength="20" placeholder="Ej. 50688887777">
+      <div class="hint">SHOELINK usará este WhatsApp para coordinar contigo los pedidos de tus modelos.</div>
+    </div>
+    <div id="items"></div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+      <button class="btn sec" type="button" onclick="addItem()">+ Agregar otro modelo</button>
+    </div>
+    <button class="btn" id="sendBtn" type="button" onclick="sendAll()" style="width:100%;">Enviar para aprobación</button>
+    <div class="hint" style="text-align:center;margin-top:8px;">Lo que envíes no se publica de inmediato: SHOELINK lo revisa y lo aprueba.</div>
+  </div>
+</main>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script>
+const firebaseConfig = {
+  apiKey: "AIzaSyClCzVwpcI0z-IcR3rMqRLR5Xjw7bIWvss",
+  authDomain: "shoelink-a37b3.firebaseapp.com",
+  databaseURL: "https://shoelink-a37b3-default-rtdb.firebaseio.com",
+  projectId: "shoelink-a37b3",
+  storageBucket: "shoelink-a37b3.firebasestorage.app",
+  messagingSenderId: "588542789961",
+  appId: "1:588542789961:web:81e8b802d870a12e0bb298"
+};
+const MAX_PHOTOS_PER_ITEM = 5;
+const MAX_ITEMS = 30;
+const token = (new URLSearchParams(location.search).get("t") || "").trim();
+let db = null, authReady = null;
+let items = []; // { photos:[dataUri], sizes:[{size,qty}] }
+
+function showStatus(cls, html){ document.getElementById("status").innerHTML = '<div class="msg '+cls+'">'+html+'</div>'; }
+function esc(s){ return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/"/g,"&quot;"); }
+
+function init(){
+  if(!token || !/^[a-f0-9]{16,64}$/i.test(token)){
+    showStatus("err","Este enlace no es válido. Pedí uno nuevo a SHOELINK.");
+    return;
+  }
+  try{
+    firebase.initializeApp(firebaseConfig);
+    db = firebase.database();
+    authReady = firebase.auth().signInAnonymously();
+    authReady.catch(function(e){ showStatus("err","No se pudo conectar. Revisá tu internet e intentá de nuevo."); console.error(e); });
+  }catch(e){
+    showStatus("err","No se pudo conectar. Revisá tu internet e intentá de nuevo."); return;
+  }
+  document.getElementById("formArea").style.display = "";
+  addItem();
+}
+
+function addItem(){
+  if(items.length >= MAX_ITEMS){ alert("Máximo "+MAX_ITEMS+" modelos por envío. Enviá este y luego otro."); return; }
+  items.push({photos:[], sizes:[{size:"",qty:""}]});
+  renderItems();
+}
+function removeItem(i){
+  if(!confirm("¿Quitar este modelo?")) return;
+  items.splice(i,1);
+  if(!items.length) items.push({photos:[], sizes:[{size:"",qty:""}]});
+  renderItems();
+}
+function readFields(){
+  // guarda lo escrito antes de redibujar
+  document.querySelectorAll("[data-item]").forEach(function(el){
+    var i = Number(el.dataset.item), f = el.dataset.f;
+    if(!items[i]) return;
+    if(f==="size" || f==="qty"){ items[i].sizes[Number(el.dataset.s)][f] = el.value; }
+    else { items[i][f] = el.value; }
+  });
+}
+function renderItems(){
+  var box = document.getElementById("items");
+  box.innerHTML = items.map(function(it,i){
+    return '<div class="card">'+
+      '<div style="display:flex;justify-content:space-between;align-items:center;"><h2>Modelo '+(i+1)+'</h2><button class="btn del" type="button" onclick="readFields();removeItem('+i+')">Quitar</button></div>'+
+      '<label>Marca</label><input data-item="'+i+'" data-f="brand" value="'+esc(it.brand)+'" maxlength="40" placeholder="Ej. NIKE">'+
+      '<label>Nombre del modelo</label><input data-item="'+i+'" data-f="name" value="'+esc(it.name)+'" maxlength="80" placeholder="Ej. Air Max 90">'+
+      '<div class="row"><div><label>Código (SKU)</label><input data-item="'+i+'" data-f="sku" value="'+esc(it.sku)+'" maxlength="40"></div>'+
+      '<div><label>Género</label><select data-item="'+i+'" data-f="gender">'+
+        ['Hombre','Mujer','Unisex','Niño','Niña'].map(function(g){return '<option'+((it.gender||'Hombre')===g?' selected':'')+'>'+g+'</option>';}).join('')+
+      '</select></div></div>'+
+      '<label>Tu precio de costo por par (colones)</label><input data-item="'+i+'" data-f="costPrice" type="number" inputmode="numeric" min="0" value="'+esc(it.costPrice)+'" placeholder="Ej. 35000">'+
+      '<label>Tallas y cantidades</label><div class="sizes">'+
+        it.sizes.map(function(s,k){
+          return '<div class="srow"><input data-item="'+i+'" data-s="'+k+'" data-f="size" value="'+esc(s.size)+'" placeholder="Talla (ej. 9 o 9.5)" maxlength="10">'+
+                 '<input data-item="'+i+'" data-s="'+k+'" data-f="qty" type="number" inputmode="numeric" min="0" value="'+esc(s.qty)+'" placeholder="Cantidad">'+
+                 '<button class="btn del" type="button" onclick="readFields();removeSize('+i+','+k+')">✕</button></div>';
+        }).join('')+
+      '</div><button class="btn sec" type="button" onclick="readFields();addSize('+i+')">+ Talla</button>'+
+      '<label>Fotos (hasta '+MAX_PHOTOS_PER_ITEM+')</label>'+
+      '<input type="file" accept="image/*" multiple onchange="readFields();addPhotos('+i+',this)">'+
+      '<div class="thumbs">'+it.photos.map(function(p,k){return '<div style="position:relative;"><img src="'+p+'"><button class="btn del" type="button" style="position:absolute;top:2px;right:2px;padding:0 7px;font-size:.8rem;" onclick="readFields();removePhoto('+i+','+k+')">×</button></div>';}).join('')+'</div>'+
+    '</div>';
+  }).join('');
+}
+function addSize(i){ items[i].sizes.push({size:"",qty:""}); renderItems(); }
+function removeSize(i,k){ items[i].sizes.splice(k,1); if(!items[i].sizes.length) items[i].sizes.push({size:"",qty:""}); renderItems(); }
+function removePhoto(i,k){ items[i].photos.splice(k,1); renderItems(); }
+
+function resizeFile(file, maxDim, quality){
+  return new Promise(function(resolve,reject){
+    var r = new FileReader();
+    r.onerror = function(){ reject(new Error("lectura")); };
+    r.onload = function(e){
+      var img = new Image();
+      img.onerror = function(){ reject(new Error("imagen")); };
+      img.onload = function(){
+        var w = img.width, h = img.height;
+        if(w>maxDim || h>maxDim){ var k = Math.min(maxDim/w, maxDim/h); w=Math.round(w*k); h=Math.round(h*k); }
+        var c = document.createElement("canvas"); c.width=w; c.height=h;
+        var x = c.getContext("2d"); x.fillStyle="#fff"; x.fillRect(0,0,w,h); x.drawImage(img,0,0,w,h);
+        resolve(c.toDataURL("image/jpeg", quality));
+      };
+      img.src = e.target.result;
+    };
+    r.readAsDataURL(file);
+  });
+}
+async function addPhotos(i, input){
+  var files = Array.from(input.files||[]);
+  var room = MAX_PHOTOS_PER_ITEM - items[i].photos.length;
+  if(files.length > room){ alert("Máximo "+MAX_PHOTOS_PER_ITEM+" fotos por modelo."); files = files.slice(0, Math.max(room,0)); }
+  try{
+    var out = await Promise.all(files.map(function(f){ return resizeFile(f, 900, 0.72); }));
+    items[i].photos = items[i].photos.concat(out);
+  }catch(e){ alert("No se pudo cargar alguna foto. Probá con otra."); }
+  renderItems();
+}
+
+async function sendAll(){
+  readFields();
+  var supplier = document.getElementById("supplierName").value.trim();
+  if(!supplier){ alert("Escribí el nombre de tu empresa o contacto."); return; }
+  var supplierPhone = document.getElementById("supplierPhone").value.replace(/\D/g,"");
+  if(supplierPhone.length < 8){ alert("Escribí tu WhatsApp con código de país (ej. 50688887777)."); return; }
+  var clean = [];
+  for(var i=0;i<items.length;i++){
+    var it = items[i], n = i+1;
+    var brand = String(it.brand||"").trim(), name = String(it.name||"").trim();
+    var cost = Number(it.costPrice);
+    var sizes = it.sizes.filter(function(s){ return String(s.size||"").trim() && Number(s.qty)>0; })
+                        .map(function(s){ return {size:String(s.size).trim(), qty:Math.floor(Number(s.qty))}; });
+    if(!brand || !name){ alert("Modelo "+n+": faltan marca o nombre."); return; }
+    if(!cost || cost<=0){ alert("Modelo "+n+": poné tu precio de costo."); return; }
+    if(!sizes.length){ alert("Modelo "+n+": poné al menos una talla con cantidad."); return; }
+    if(!it.photos.length){ alert("Modelo "+n+": subí al menos una foto."); return; }
+    clean.push({brand:brand, name:name, sku:String(it.sku||"").trim(), gender:it.gender||"Hombre", costPrice:cost, sizes:sizes, photos:it.photos});
+  }
+  var btn = document.getElementById("sendBtn");
+  btn.disabled = true; btn.textContent = "Enviando...";
+  try{
+    await authReady;
+    await db.ref("submissions").push({token:token, supplier:supplier, supplierPhone:supplierPhone, createdAt:Date.now(), items:clean});
+    document.getElementById("formArea").style.display = "none";
+    showStatus("ok","<b>¡Enviado!</b> Recibimos tus "+clean.length+" modelo(s). SHOELINK los va a revisar y aprobar. Ya podés cerrar esta página.");
+    window.scrollTo(0,0);
+  }catch(e){
+    console.error(e);
+    btn.disabled = false; btn.textContent = "Enviar para aprobación";
+    var denied = e && (e.code==="PERMISSION_DENIED" || /permission/i.test(e.message||""));
+    showStatus("err", denied ? "Este enlace ya no está activo. Pedí uno nuevo a SHOELINK." : "No se pudo enviar. Revisá tu internet e intentá de nuevo.");
+    window.scrollTo(0,0);
+  }
+}
+init();
+</script>
+</body>
+</html>
